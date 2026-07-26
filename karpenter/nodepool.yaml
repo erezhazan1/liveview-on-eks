@@ -1,0 +1,55 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: liveview
+spec:
+  template:
+    metadata:
+      labels:
+        workload: liveview
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: liveview
+      # Dedicated, tainted pool: connection-holding pods are isolated from churny
+      # batch/stateless neighbors, so THIS pool's disruption settings alone govern them.
+      taints:
+        - {key: workload, value: liveview, effect: NoSchedule}
+      expireAfter: 336h   # 14d node hygiene; PDB + budgets below pace the resulting drains
+      requirements:
+        - {key: kubernetes.io/os, operator: In, values: [linux]}
+        - {key: kubernetes.io/arch, operator: In, values: [amd64]}   # single-arch image; Graviton = future cost lever, needs multi-arch build
+        - {key: karpenter.sh/capacity-type, operator: In, values: [on-demand]}
+        # Spot rejected deliberately: a 2-min interruption mass-drops sockets and
+        # triggers reconnect stampedes onto survivors - wrong risk for this workload.
+        - {key: karpenter.k8s.aws/instance-category, operator: In, values: [m, c]}
+        # m6i/c6i and newer. Per-family availability in us-gov-west-1 is not asserted here:
+        # `requirements` act as a filter over what the region actually offers, not a demand
+        # for it, so a family that isn't published in-region is simply never selected and
+        # nothing errors at apply time. The failure mode to know about is the opposite one -
+        # if the requirements leave NO overlap at all, Karpenter launches nothing and pods
+        # stay Pending. With m/c across generations 6+ that target is deliberately wide.
+        - {key: karpenter.k8s.aws/instance-generation, operator: Gt, values: ["5"]}
+        # Mid-size nodes only: big enough to amortize daemonsets, small enough that
+        # one node loss doesn't drop a huge share of open connections.
+        - {key: karpenter.k8s.aws/instance-cpu, operator: In, values: ["4", "8", "16"]}
+        - {key: karpenter.k8s.aws/instance-memory, operator: Gt, values: ["7000"]}
+  limits:
+    cpu: "200"
+    memory: 400Gi
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 10m   # longer than stateless defaults: repacking = eviction = reconnect cost
+    budgets:
+      # Schema verified against the real 1.11.1 NodePool CRD (`kubectl explain
+      # nodepool.spec.disruption.budgets`) and https://karpenter.sh/docs/concepts/disruption/:
+      # fields are nodes (required), reasons ([]string, one of Empty|Underutilized|Drifted),
+      # schedule (cron, UTC only), duration. A budget with no `reasons` applies to all reasons.
+      - {nodes: "20%", reasons: [Empty, Drifted]}
+      - {nodes: "10%", reasons: [Underutilized]}
+      # Business-hours freeze for underutilized-consolidation. Karpenter cron is UTC-only and
+      # can't track DST, so 13:00-21:00 UTC = 09:00-17:00 ET in summer (EDT) but 08:00-16:00 ET
+      # in winter (EST) - the local window drifts an hour by season but still covers core
+      # business hours. No voluntary repacking of live nodes during peak; off-hours still runs.
+      - {nodes: "0", reasons: [Underutilized], schedule: "0 13 * * mon-fri", duration: 8h}

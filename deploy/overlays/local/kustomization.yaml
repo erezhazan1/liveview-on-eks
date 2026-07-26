@@ -1,0 +1,59 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Explicit namespace here (in addition to the base's own `namespace: demo`) is required:
+# resources added directly in THIS kustomization (postgres.yaml, and the generated
+# demo-config/demo-secrets) are not covered by the base's namespace transform, and would
+# otherwise land in whatever namespace `kubectl apply` defaults to instead of `demo` -
+# breaking the postgres.demo.svc.cluster.local DNS name used in secrets.env.
+namespace: demo
+resources:
+  - namespace.yaml
+  - ../../base
+  - postgres.yaml
+configMapGenerator:
+  - name: demo-config
+    envs: [config.env]
+secretGenerator:
+  - name: demo-secrets
+    envs: [secrets.env]
+images:
+  - name: demo:local
+    newName: demo
+    newTag: local
+patches:
+  # LOCAL-ONLY memory bump. base/deployment.yaml sizes the app at 256Mi (initContainer)
+  # / 512Mi (main container), which is intended for real nodes. On a resource-constrained
+  # nested-container host (kind on WSL2, 3-node control plane + workloads sharing 4 vCPUs) a
+  # plain release boot measurably needs much more: live RSS polling via
+  # `/proc/<pid>/status` (kubectl exec into a throwaway debug pod, same image/env/
+  # securityContext, generous limit) showed `eval "Demo.Release.migrate()"` peaking
+  # around ~1.6GiB, and `start` (the real app: Endpoint+PubSub+Presence+Telemetry)
+  # stabilizing at a steady ~1.7GiB RSS - confirmed independently via dmesg memcg
+  # oom-killer entries on beam.smp matching the declared cgroup limits almost exactly
+  # (e.g. killed at anon-rss ~517Mi against a 512Mi limit). A flat `docker run
+  # --memory=256m` (no kind/kubelet nesting, no control-plane CPU contention) runs the
+  # same migrate task fine in 256Mi, so the base numbers aren't "wrong" in the abstract -
+  # this environment's BEAM boot is just measurably heavier/slower under contention.
+  # 2Gi gives solid headroom above the observed peaks for both containers. This is
+  # scoped to the local overlay only; deploy/base and every other overlay are untouched.
+  - target:
+      kind: Deployment
+      name: demo
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: demo
+      spec:
+        template:
+          spec:
+            initContainers:
+              - name: migrate
+                resources:
+                  requests: {cpu: 100m, memory: 2Gi}
+                  limits: {memory: 2Gi}
+            containers:
+              - name: demo
+                resources:
+                  requests: {cpu: 500m, memory: 2Gi}
+                  limits: {memory: 2Gi}

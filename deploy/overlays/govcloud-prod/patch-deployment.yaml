@@ -1,0 +1,24 @@
+# Production scheduling patch, strategic-merged onto base's Deployment.
+#
+# - The replica floor is NOT set here. `spec.replicas` is deliberately absent from
+#   base (the HPA owns it - see base/deployment.yaml for why), so patching a literal
+#   onto the Deployment would be pulled back to the HPA's minReplicas within one
+#   stabilization window and would fight every apply. The production floor of 3 is
+#   raised on the HPA instead: see patch-hpa.yaml.
+# - nodeSelector + a matching toleration pin these pods to (and only to) the
+#   dedicated `workload: liveview` Karpenter-provisioned node pool (see the
+#   next task's NodePool, which taints its nodes with the same key/value/
+#   effect). The label/taint pair must match exactly on both sides:
+#   nodeSelector picks the node, the toleration is what lets the pod survive
+#   the node's NoSchedule taint that repels every other workload.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  template:
+    spec:
+      nodeSelector:
+        workload: liveview
+      tolerations:
+        - {key: workload, value: liveview, effect: NoSchedule}

@@ -1,0 +1,24 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: demo
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: demo}
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 65}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0      # bursty traffic: react immediately
+      policies:
+        - {type: Percent, value: 100, periodSeconds: 15}
+        - {type: Pods, value: 4, periodSeconds: 15}
+      selectPolicy: Max # take whichever is larger
+    scaleDown:
+      stabilizationWindowSeconds: 300    # scale-in kills pods holding live sockets - do it slowly --> ~5 minutes
+      policies:
+        - {type: Percent, value: 10, periodSeconds: 60} # ~1 pod per minute

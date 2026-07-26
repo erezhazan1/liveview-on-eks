@@ -1,0 +1,87 @@
+# =============================================================================
+# EXAMPLE / SKETCH - NOT APPLIED, NOT part of any kustomization.
+# =============================================================================
+# This is the HPA I would *actually* want for this workload, contrasted with the
+# CPU-based HPA that ships in deploy/base/hpa.yaml. It is deliberately kept out of
+# every overlay's `resources:` so it never gets applied - it depends on a metrics
+# pipeline (below) that does not exist in this repo.
+#
+# WHY connected sockets, not CPU
+# ------------------------------
+# Measured in this repo (loadtest/PLAN.md, and README §"HPA signal"): 60 LiveView
+# sockets held idle drove 0-1% CPU; the same 60 sockets during a connect storm drove
+# 183% CPU. CPU tracks the *connect/mount* transient, not the *standing load* of the
+# connections you're already holding. But the thing that actually caps a BEAM node's
+# capacity for THIS workload is the number of live Phoenix.Socket/LiveView processes
+# it carries - each is an Erlang process with a mailbox and a chunk of heap. A node
+# can sit at 5% CPU while being one mount away from memory/scheduler saturation.
+# `phoenix_socket_connected` (a per-pod gauge of currently-connected sockets) tracks
+# that saturation dimension directly. CPU stays as the base/default because it needs
+# no extra infrastructure and it does catch connect storms; this is the upgrade.
+#
+# THE PIPELINE this metric assumes (what you'd build to make it real)
+# ------------------------------------------------------------------
+#   1. App: emit the gauge. This is the genuinely non-trivial step. Phoenix fires
+#      [:phoenix, :socket_connected] on connect, but there is NO matching disconnect
+#      event (checked against phoenix 1.6.0 and current main) - so a telemetry_metrics
+#      `last_value` fed only by built-in events would climb forever and never decrement.
+#      A correct gauge has to observe teardown itself: monitor the transport process and
+#      decrement on :DOWN, then expose /metrics via PromEx or telemetry_metrics_prometheus.
+#      (A crude alternative that sidesteps this: periodically count
+#      Phoenix.Tracker/Presence entries, or poll the socket supervisor's child count.)
+#   2. Scrape: Prometheus scrapes each pod's /metrics (the pods already carry
+#      prometheus.io/scrape-style annotations in this org's convention).
+#   3. Adapt to the k8s metrics API - either:
+#        a. prometheus-adapter, which surfaces the Prometheus series under
+#           custom.metrics.k8s.io so a native HPA `Pods` metric (this file) can read it; OR
+#        b. KEDA, whose ScaledObject wraps the same idea with a Prometheus trigger
+#           (often less fiddly than hand-writing prometheus-adapter rules).
+#   4. HPA (this object) reads the per-pod average and scales.
+#
+# Until that pipeline exists, applying this HPA would leave it stuck at
+# "unable to fetch metrics" - hence: example only.
+# =============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: demo-socket-scaled
+  # namespace: demo  # (set by whatever applies it; omitted so this file is inert)
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: demo
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    # Primary signal: average currently-connected sockets per pod. When the fleet
+    # averages > 2000 held sockets/pod, add capacity - regardless of CPU.
+    - type: Pods
+      pods:
+        metric:
+          name: phoenix_socket_connected
+        target:
+          type: AverageValue
+          averageValue: "2000"
+    # Keep CPU as a secondary guardrail: a connect storm (high CPU, sockets not yet
+    # counted) still triggers a scale-up before the socket gauge catches up. The HPA
+    # scales on whichever metric demands the MOST replicas.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+  behavior:
+    # Same philosophy as the base CPU HPA: react fast to load, shed slowly. Scale-in
+    # evicts pods holding live sockets, so it must be gentle to avoid reconnect churn.
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - {type: Percent, value: 100, periodSeconds: 15}
+        - {type: Pods, value: 4, periodSeconds: 15}
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - {type: Percent, value: 10, periodSeconds: 60}

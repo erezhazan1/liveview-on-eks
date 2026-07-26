@@ -1,0 +1,14 @@
+.git
+_build
+deps
+priv/static/assets
+priv/static/cache_manifest.json
+doc
+test
+README.md
+ACTION-PLAN.md
+deploy
+karpenter
+loadtest
+*.md
+!config/*.md

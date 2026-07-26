@@ -1,0 +1,35 @@
+# Default-deny NetworkPolicy for the demo pods, with explicit allow rules for
+# the traffic the app actually needs. podSelector matches on
+# app.kubernetes.io/name: demo, which base's labels transformer
+# (includeSelectors: true) stamps onto the pod template, so this targets
+# exactly (and only) this Deployment's pods.
+#
+# ENFORCEMENT CAVEAT (read before trusting this in kind): this manifest is
+# validated here only as YAML via `kustomize build` / `kubectl apply --dry-run`.
+# kind's default CNI does NOT implement the NetworkPolicy API, so applying
+# this to the local kind cluster would have ZERO enforcement effect - traffic
+# would flow exactly as if this object didn't exist. Real enforcement needs a
+# NetworkPolicy-capable CNI (Calico, Cilium, etc.) on the target cluster. In
+# this org's istio/ambient-mesh world, the equivalent (and possibly
+# complementary) control could instead be expressed as an istio
+# AuthorizationPolicy. NetworkPolicy is still included here because it's the
+# portable, CNI-level expression of intent and costs nothing to declare
+# alongside whatever mesh-level policy is layered on top in a real cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: demo
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: demo}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # No `from:` restriction - allow ingress to the app port from anywhere in
+    # (or routed into) the cluster; the Service/ingress path is what actually
+    # scopes reachability in practice.
+    - ports: [{port: 4000}]
+  egress:
+    - to: []                       # DNS: no destination restriction, port-scoped only
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - to: [{ipBlock: {cidr: 10.0.0.0/16}}]   # RDS subnets - PLACEHOLDER CIDR, not a real VPC range.
+      ports: [{port: 5432}]                  # Replace with the actual GovCloud VPC/RDS subnet CIDR at deploy time.

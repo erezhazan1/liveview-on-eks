@@ -1,0 +1,15 @@
+# NOTE (environment-specific): on a cgroup v1 host (e.g. WSL2), kind's default node
+# image for kind v0.33.0-alpha (kindest/node:v1.36.1) hard-fails - kubelet refuses to
+# start at all with "kubelet is configured to not run on a host using cgroup v1" and
+# crash-loops forever, so the control plane never comes up. Verified via
+# `docker exec <node> journalctl -u kubelet`. Workaround: pin an older, cgroup-v1-capable
+# node image via a flag (kept out of this file, since it's an environment-specific
+# workaround, not a property of the cluster topology described here):
+#   kind create cluster --name demo --config kind-config.yaml --image kindest/node:v1.31.0
+# On a cgroup v2 host the flag is unnecessary and the plain command works.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

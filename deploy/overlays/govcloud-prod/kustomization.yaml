@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Explicit namespace here (mirroring the local overlay) is required: resources
+# added directly in THIS kustomization (networkpolicy.yaml, and the generated
+# demo-config) are not covered by base's own `namespace: demo` transform -
+# that only applies to resources rendered from within base's own build.
+# Confirmed empirically: without this field, the generated ConfigMap and the
+# NetworkPolicy both render with no namespace (inconsistent with the
+# Deployment, which already carries namespace: demo from base), AND kustomize's
+# nameReference transformer stops rewriting envFrom.configMapRef.name to the
+# generated demo-config-<hash> name - leaving a dangling reference to a
+# ConfigMap that was never actually created under that literal name. A
+# NetworkPolicy's podSelector also only ever matches pods in its OWN
+# namespace, so an unset namespace here would silently make it protect
+# nothing.
+namespace: demo
+resources:
+  - ../../base
+  - networkpolicy.yaml
+patches:
+  - path: patch-deployment.yaml
+  - path: patch-hpa.yaml
+configMapGenerator:
+  - name: demo-config
+    envs: [config.env]
+images:
+  - name: demo:local
+    # GovCloud ECR - note the aws-us-gov partition account/domain shape
+    newName: "123456789012.dkr.ecr.us-gov-west-1.amazonaws.com/demo"
+    newTag: "v0.1.0"
+# demo-secrets is intentionally NOT generated here - there is no secretGenerator
+# in this file. The base Deployment's envFrom still references a Secret named
+# demo-secrets (DATABASE_URL, SECRET_KEY_BASE), so that reference is left
+# dangling BY DESIGN: `kustomize build` renders cleanly regardless (kustomize
+# does not validate that referenced Secrets exist), but a real `kubectl apply
+# -k` of this overlay would leave the Deployment's pods stuck failing to start
+# until something else provides demo-secrets in the `demo` namespace first. In
+# real GovCloud that "something else" is the External Secrets Operator or the
+# Secrets Store CSI driver pulling from AWS Secrets Manager - never a file
+# committed to this repo. This is a deliberate no-secrets-in-git choice, not
+# an oversight.

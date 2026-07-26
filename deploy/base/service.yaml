@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo
+spec:
+  # ClusterIP, deliberately - not LoadBalancer or NodePort. The app speaks plain HTTP on
+  # :4000 and something in front of it terminates TLS (ALB Ingress, or this org's istio
+  # Gateway/VirtualService). A per-Service LoadBalancer would provision its own AWS load
+  # balancer, bypass that shared L7 boundary, and put a raw internet-facing endpoint inside
+  # a GovCloud perimeter - all of which is the wrong shape here.
+  type: ClusterIP
+  # NO sessionAffinity, and that IS the LiveView-specific decision. A WebSocket is one
+  # long-lived connection: it lands on a Ready pod, mounts there, and stays there for its
+  # whole life, so stickiness buys nothing - and pinning clients to pods actively hurts a
+  # drain, because it defeats the reconnect-to-a-different-pod behaviour the rollout
+  # depends on. The one case that WOULD need affinity is LiveView's long-poll fallback
+  # transport (used when a proxy blocks WS), where a session is a series of separate HTTP
+  # requests that must all reach the same pod. Documented as a real gap in the README
+  # rather than papered over with ClientIP affinity this workload doesn't otherwise want.
+  ports:
+    # appProtocol: http lets istio / ALB pick the L7 protocol explicitly instead of sniffing.
+    - {name: http, port: 80, targetPort: http, appProtocol: http}

@@ -1,0 +1,8 @@
+# Local overlay owns the namespace so `kubectl apply -k deploy/overlays/local` works from a
+# clean clone with no manual `kubectl create namespace` step. Prod overlays intentionally do
+# NOT create the namespace - in a real cluster it's provisioned/labeled by the platform
+# (GitOps, Terraform, istio/PSA labels, quotas), not by the app's own kustomization.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo

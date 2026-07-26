@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  # `replicas` is deliberately ABSENT: the HPA owns this field. If it were set here,
+  # every `kubectl apply -k` (or GitOps reconcile) would write the literal back over
+  # whatever the HPA had decided - and a Deployment scale-down is the ReplicaSet
+  # controller deleting pods directly, which does NOT go through the Eviction API, so
+  # the PodDisruptionBudget never sees it and can't pace it. An apply landing during a
+  # burst would drop capacity in one step, killing sockets exactly the way the rest of
+  # this file works to prevent. The replica FLOOR lives in the HPA's minReplicas
+  # (base: 2; govcloud-prod overlay raises it to 3 via patch-hpa.yaml).
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0   # never shrink serving capacity during a deploy - pods hold live sockets
+  selector: {}            # filled by kustomize commonLabels
+  template:
+    metadata: {}
+    spec:
+      serviceAccountName: demo
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: migrate
+          image: demo:local   # overlays patch the real image
+          args: ["eval", "Demo.Release.migrate()"]
+          envFrom:
+            - secretRef: {name: demo-secrets}
+            - configMapRef: {name: demo-config}
+          securityContext: &ctrsec
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 256Mi}
+      containers:
+        - name: demo
+          image: demo:local
+          ports:
+            - {name: http, containerPort: 4000}
+          envFrom:
+            - secretRef: {name: demo-secrets}     # DATABASE_URL, SECRET_KEY_BASE
+            - configMapRef: {name: demo-config}   # PHX_SERVER, PHX_HOST, PORT, POOL_SIZE, RELEASE_TMP
+          # No CPU limit: CFS throttling wrecks tail latency for BEAM schedulers on a
+          # latency-sensitive service. Memory request == limit: predictable node packing,
+          # OOM is visible instead of neighbor-eviction.
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {memory: 512Mi}
+          securityContext: *ctrsec
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}   # BEAM + RELEASE_TMP need a writable tmp with readOnlyRootFilesystem
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Endpoint-slice/LB deregistration isn't instant; keep serving while
+              # routing catches up, THEN let SIGTERM start the cowboy drainer.
+              #
+              # Native `sleep` lifecycle action rather than `exec: ["sh","-c","sleep 10"]`:
+              # beta and on by default since k8s 1.30, GA in 1.34 (KEP-3960). The kubelet handles the
+              # delay itself, so nothing is forked inside the container - no shell process,
+              # no dependency on a shell existing in the image at all. (Requires >=1.30;
+              # on anything older this field is rejected and the exec form is the fallback.)
+              sleep:
+                seconds: 10
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          # NOT auto-filled by kustomize's labels transformer (verified empirically via
+          # `kustomize build`: topologySpreadConstraints[].labelSelector isn't in its default
+          # fieldSpecs) - explicit here, since an empty labelSelector spreads ALL pods in the
+          # namespace cluster-wide instead of just this Deployment's pods.
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: demo
+              app.kubernetes.io/part-of: liveview-assignment
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: demo
+              app.kubernetes.io/part-of: liveview-assignment
+      volumes:
+        - name: tmp
+          emptyDir: {}

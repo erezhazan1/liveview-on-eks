@@ -1,0 +1,17 @@
+# Production replica floor.
+#
+# This - not a `replicas:` field on the Deployment - is what actually holds 3 pods at
+# steady state. The HPA continuously reconciles the Deployment toward its own bounds,
+# so a literal on the Deployment gets pulled back to minReplicas within one
+# stabilization window (300s) and then re-fought on every apply. Setting the floor on
+# the autoscaler makes it the single owner of replica count.
+#
+# Three is the floor because us-gov-west-1 has 3 availability zones: with the base
+# Deployment's zone topologySpreadConstraint (maxSkew: 1), a floor of 3 is what lets
+# the fleet sit one pod per AZ at rest. maxReplicas stays at base's 10.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: demo
+spec:
+  minReplicas: 3

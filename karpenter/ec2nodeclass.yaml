@@ -1,0 +1,52 @@
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: liveview
+spec:
+  # Bottlerocket: minimal, immutable, SELinux-enforcing - the right posture for a
+  # regulated environment.
+  #
+  # Availability notes and sourcing:
+  #   - Bottlerocket has been GA in AWS GovCloud (US) Regions since Nov 2021
+  #     (https://aws.amazon.com/about-aws/whats-new/2021/11/bottlerocket-now-available-aws-govcloud-us-regions/),
+  #     and Bottlerocket community AMIs are confirmed present in the us-gov-west-1
+  #     AMI catalog. On that basis Bottlerocket is the right default here.
+  #   - The one report that looked like a GovCloud gap
+  #     (bottlerocket-os/bottlerocket#4668, Oct 2025) is CLOSED as resolved.
+  #     A maintainer ran the SSM lookup for the x86_64 EKS/k8s variant in
+  #     us-gov-west-1 and got a real AMI (ami-09483b06ffffa4bb6) - note that
+  #     reproduction was against the aws-k8s-1.34 parameter path, so substitute
+  #     your own cluster's minor version below. The reporter's problem was
+  #     console pagination + a Git-Bash quoting artifact (Git Bash mangles the
+  #     `1.34` segment as a path), not a missing SSM parameter. So the x86_64
+  #     k8s Bottlerocket path Karpenter resolves via `alias` IS published.
+  #   - Fallback, if AMI resolution ever fails in-region (verify, then switch):
+  #       aws ssm get-parameter --region us-gov-west-1 \
+  #         --name /aws/service/bottlerocket/aws-k8s-1.34/x86_64/latest/image_id
+  #     fall back to `amiFamily: AL2023` + `amiSelectorTerms: [{alias: al2023@<version>}]`
+  #     (or pin amiSelectorTerms by explicit `ssmParameter`/`id`).
+  amiSelectorTerms:
+    - alias: bottlerocket@v1.57.0   # pinned, not @latest: AMI rollout via Drift is a deliberate, budgeted event
+  role: Karpenter-demo-cluster-Node-Role   # by NAME, not ARN - partition-agnostic, works unchanged in aws-us-gov
+  subnetSelectorTerms:
+    - tags: {karpenter.sh/discovery: demo-cluster}   # private subnets only in GovCloud
+  securityGroupSelectorTerms:
+    - tags: {Name: demo-cluster-node}
+  metadataOptions:
+    httpEndpoint: enabled
+    httpTokens: required        # IMDSv2 only
+    httpPutResponseHopLimit: 1  # pods can't reach node credentials; IRSA unaffected
+  blockDeviceMappings:
+    - deviceName: /dev/xvda     # Bottlerocket OS volume
+      ebs: {volumeType: gp3, volumeSize: 4Gi, encrypted: true, deleteOnTermination: true}
+    - deviceName: /dev/xvdb     # data/images volume
+      ebs: {volumeType: gp3, volumeSize: 40Gi, encrypted: true, deleteOnTermination: true}
+      # In GovCloud: add kmsKeyID (note the capital ID - that's the actual CRD field
+      # name) with a customer-managed key per compliance baseline
+  detailedMonitoring: true
+  userData: |
+    [settings.metrics]
+    send-metrics = false        # no phone-home from a GovCloud boundary
+  tags:
+    Name: demo-cluster-liveview
+    workload: liveview
